@@ -6,6 +6,11 @@ library(dplyr)
 library(shinythemes)
 library(magrittr)
 library(reshape2)
+library(pROC)
+library(randomForest)
+library(glmnet)
+library(shinyBS)
+
 
 # Data Setup ------------------------------------------------------------------------------------------------------------------
 
@@ -15,13 +20,10 @@ getwd() #**set up so your working directory is the repository
 #Import Data
 AlumnData <- read.csv(here("ScholarshipApplicationDataFilePretend.csv"))
 
+# Analysis ------------------------------------------------------------------------------------------------------------------
 table(AlumnData$State)
 sum(table(AlumnData$CollegeRegion))
 
-# Analysis ------------------------------------------------------------------------------------------------------------------
-table(AlumnData$Matriculating, AlumnData$OfferOfAdmissionExtended)
-
-table(AlumnData$Major)
 
 #t-test on GPA
 subset_matriculated <- AlumnData %>% filter(OfferOfAdmissionExtended == 'YES') %>%
@@ -57,6 +59,118 @@ prop_test_results <- prop_test_results %>% set_colnames(c("Major", "X-Squared", 
 
 #chi-squared test with gender
 chisq.test(table(subset_accepted$Matriculating, subset_accepted$Gender))
+
+#chi-squared test with citizenship
+chisq.test(table(subset_accepted$Dom_Int, subset_accepted$Matriculating))
+
+
+
+ggplot(data = subset_accepted) + geom_point(aes(x = GPA, y =  GRE, color = Matriculating))
+
+#remove variables that cannot be used
+subset_accepted_cleaned <- subset_accepted %>% dplyr::select(-c("ï..ID", "OfferOfAdmissionExtended", "TOEFL", "CollegeName", "State",
+                                                                "CollegeRegion")) %>%
+                          mutate(Major = ifelse(Major %in% c("Accounting", "Finance", "Management", "Economics"),"Soft Science",
+                                            ifelse(Major %in% c("CS", "Engineering", "Math", "Physics", "Statistics"),
+                                                   "Hard Science", "Other") ) ) %>% mutate(Major = as.factor(Major)) %>% na.omit(.)
+  
+
+
+
+
+#clean subset with all majors and new region variable
+subset_accepted_cleaned3 <- subset_accepted %>% dplyr::select(-c("ï..ID", "OfferOfAdmissionExtended", "TOEFL","CollegeName")) %>%
+                              mutate(CollegeRegion = as.character(CollegeRegion)) %>% mutate(State = as.character(State))
+
+subset_accepted_cleaned3$CollegeRegion[subset_accepted_cleaned3$CollegeRegion == 'USA' &
+                                         !is.na(subset_accepted_cleaned3$State)] = 
+  subset_accepted_cleaned3$State[subset_accepted_cleaned3$CollegeRegion == 'USA' & !is.na(subset_accepted_cleaned3$State)]
+
+subset_accepted_cleaned3$CollegeRegion <-ifelse(subset_accepted_cleaned3$CollegeRegion %in% c("Connecticut", "Maine", "Pennsylvania", "New Jersey", "Pittsburgh",
+                                                     "New York", "Massachusetts"), "New England", ifelse(subset_accepted_cleaned3$CollegeRegion %in% 
+                                                      c("DC", "Delaware", "Virginia", "Maryland"), "DMV", ifelse(
+                                                        subset_accepted_cleaned3$CollegeRegion %in% c("Canada", "China", "India", "Korea",
+                                                      "Scotland", "Singapore", "Spain", "UK"), "International", ifelse(
+                                                        subset_accepted_cleaned3$CollegeRegion %in% c("Georgia", "Alabama",
+                                                      "Florida", "North Carolina", "Tennessee"), "South",  ifelse(
+                                                        subset_accepted_cleaned3$CollegeRegion == "USA", "USA","West"))  )) )
+
+subset_accepted_cleaned3 <- subset_accepted_cleaned3 %>% mutate(CollegeRegion = as.factor(CollegeRegion)) %>%
+  dplyr::select(-c("State")) %>% na.omit(.)
+
+#**this is the variable created
+table(subset_accepted_cleaned3$CollegeRegion)
+
+
+
+#chi-squared test on college region (Excluding USA - unknown state and South due to low counts)
+chisq.test(table(subset_accepted_cleaned3$CollegeRegion, subset_accepted_cleaned3$Matriculating)[-c(5,4),] )
+
+
+
+#Run random forest model
+#10-fold cv
+
+folds <- sample(rep(1:10, length.out = nrow(subset_accepted_cleaned3)), size = nrow(subset_accepted_cleaned3), replace = F)
+accuracies <- c()
+for(x in 1:10){
+  model <- randomForest(Matriculating ~ ., data = subset_accepted_cleaned3[folds != x,], ntree = 100)
+  preds <- unname(predict(model,  subset_accepted_cleaned3[folds == x,]))
+
+  conf <- table(preds, subset_accepted_cleaned3[folds == x,]$Matriculating)
+  acc <- sum(diag(conf))/sum(conf)
+  accuracies <- rbind(accuracies, acc)
+  
+}
+#Box plot of accuracies
+ggplot() #blah
+
+#Hold-out 70%-30%
+model <- randomForest(Matriculating ~ ., data = subset_accepted_cleaned3[!folds %in% c(1,2,3),], ntree = 100)
+preds <- unname(predict(model,  subset_accepted_cleaned3[folds %in% c(1,2,3),], type = "prob")[,1])
+
+#what variables were most important
+varImpPlot(model)
+
+
+dfplot <- data.frame("pred" = preds, "cover" = subset_accepted_cleaned3[folds %in% c(1,2,3),]$Matriculating)
+ggplot(data = dfplot) + geom_histogram(aes(x = pred, y =..density.., fill = cover),
+                                       position = "identity", bins = 10, alpha = .5)
+plot(roc(dfplot$cover, dfplot$pred))
+
+
+#Logisitic Model -- Not great
+mod <- glm(data = subset_accepted_cleaned3, Matriculating ~ ., family = "binomial")
+summary(mod)
+
+#10-fold cv
+folds <- sample(rep(1:10, length.out = nrow(subset_accepted_cleaned3)), size = nrow(subset_accepted_cleaned3), replace = F)
+accuracies <- c()
+for(x in 1:10){
+  model <- glm(data = subset_accepted_cleaned3[folds != x,], Matriculating ~ ., family = "binomial")
+  preds <- unname(predict(model,  subset_accepted_cleaned3[folds == x,], type = "response")) 
+  preds <- as.factor(ifelse(preds > .5, "YES", "NO"))
+  conf <- table(preds, subset_accepted_cleaned3[folds == x,]$Matriculating)
+  acc <- sum(diag(conf))/sum(conf)
+  accuracies <- rbind(accuracies, acc)
+  
+}
+#Box plot of accuracies
+ggplot() #blah
+
+
+#Hold-out 70%-30%
+model <- glm(data = subset_accepted_cleaned3[!folds %in% c(1,2,3),], Matriculating ~ ., family = "binomial")
+preds <- unname(predict(model,  subset_accepted_cleaned3[folds %in% c(1,2,3),], type = "response"))
+dfplot <- data.frame("pred" = preds, "cover" = subset_accepted_cleaned3[folds %in% c(1,2,3),]$Matriculating)
+ggplot(data = dfplot) + geom_histogram(aes(x = pred, y =..density.., fill = cover),
+                                       position = "identity", bins = 10, alpha = .5)
+plot(roc(dfplot$cover, dfplot$pred))
+
+
+
+
+
 
 
 # Functions -------------------------------------------------------------------------------------------------------------
@@ -108,6 +222,7 @@ createPanel <- function(name, body) {
   
   return(obj)
 }
+
 
 createPaneldiscrete <- function(name, body) {
   obj <- tabPanel(name, br(),
@@ -162,6 +277,8 @@ createhist <- function(name, matriculation, inp_bins, subsetAdmit){
 }
 
 
+
+
 createdens <- function(name, matriculation, subsetAdmit){
   #create dataframe
   dfplot <- subsetAdmit() %>% filter(Matriculating %in% matriculation)
@@ -203,9 +320,9 @@ createcount <- function(name, subset){
     geom_jitter(aes(color = Matriculating), size = 4, show.legend=FALSE) +
     geom_vline(xintercept=seq(1.5, length(unique(dfplot$variable))-0.5, 1), lwd=1, colour="grey") +
     geom_hline(yintercept=seq(1.5, length(unique(dfplot$Matriculating))-0.5, 1), lwd=1, colour="grey") +
-    scale_y_discrete(labels = c("Did Not Matriculate", "Matriculated")) +
+    scale_y_discrete(labels = c("Did Not Matriculate", "Matriculated")) + labs(y = '', x = '') +
     scale_color_manual(values = c("#F79857", "#61A9B0")) + theme_minimal() +
-    theme(axis.text.x = element_text(hjust = 1, angle = 45))
+    theme(axis.text.x = element_text(hjust = 1, angle = 45), text = element_text(size = 15))
 }
 
 createprop <- function(name, subset){
@@ -222,8 +339,8 @@ createprop <- function(name, subset){
   
   ggplot(dfplot, aes(variable, Matriculating, fill = Percent)) + 
     geom_tile(colour = 'grey30', size = 2) + geom_text(aes(label=label)) +
-    theme_minimal() + theme(axis.text.x = element_text(hjust = 1, angle = 45), legend.position = "none") +
-    labs(y = '', x = '') +
+    theme_minimal() + theme(axis.text.x = element_text(hjust = 1, angle = 45), legend.position = "none",
+      text = element_text(size = 15)) + labs(y = '', x = '') +
     scale_fill_gradientn(colours = c('#cdf1f9', '#059abd'), values = c(0,1)) +
     scale_x_discrete(labels=major.labels) +
     scale_y_discrete(labels = c("Did Not Matriculate", "Matriculated"))
@@ -236,12 +353,13 @@ createprop <- function(name, subset){
 
 textGPA <- "Students who matriculated (ended up enrolling) tended to have lower GPAs, on average.  The mean GPA for matriculated students was about 3.54, while the non-matriculated students had mean GPAs of 3.67.  A t-test found that the mean GPAs of matriculated and non-matriculated students were different at a statistically significant level (t = -4.1945, df = 179, p-value = ~4.2x10^-5).  Meaning, there is strong evidence indicating that accepted students who did not enroll had higher average GPAs than accepted students who did enroll."
 textGRE <- "Both types of students had highly skewed distributions for GRE scores.  However, accepted students who did not end up enrolling had, on average, higher GRE scores.  The mean GRE score for matriculated students was about 166.23, while the mean score for non-matriculaed students was 167.91.  A t-test found that the mean GRE scores of matriculated and non-matriculated students were different at a statistically significant level (t = -2.604, df = 141, p-value = .0004). "
-textMajor <- "In the visual with dots, each dot represents an accepted student, and the color/position of that dot indicates whether they matriculated.  That visual depicts a wide variety of counts for each undergraduate major; because some majors had small counts, it's not possible to run a chi-squared significance test on this entire table.  However, proportions tests were run to see if the percentages of matriculated and non-matriculated students from each individual major were different.  (Refer to the second visual to see the percentages by major.)  No major had statistically significant differences in their proportions of matriculated students.  The only major that got close to having a significant difference was the "Other" major category, which had a p-value of 0.07."
-textGender <- "In the visual with dots, each dot represents an accepted student, and the color/position of that dot indicates whether they matriculated.  This visual indicates that there were relatively consistent counts within each category.  The next visual shows the proportions by gender.  About 70% of men who were accepted matriculated into the program, while only 61% of women did.  However, a chi-squared test run on the counts used to make these tables did not find a significant difference.  This means that although proportionally more men matriculated in this sample, this difference is not significant. "
-textCitz <- "insert here"
+textMajor <- "In the visual with dots, each dot represents an accepted student, and the color/position of that dot indicates whether they matriculated.  That visual depicts a wide variety of counts for each undergraduate major; because some majors had small counts, it's not possible to run a chi-squared significance test on this entire table.  However, proportions tests were run to see if the percentages of matriculated and non-matriculated students from each individual major were different.  (Refer to the second visual to see the percentages by major.)  No major had statistically significant differences in their proportions of matriculated students.  The only major that got close to having a significant difference was the 'Other' major category, which had a p-value of 0.07."
+textGender <- "The first visual indicates that there were relatively consistent counts of accepted students within each gender category.  The next visual shows the proportions by gender.  About 70% of men who were accepted matriculated into the program, while only 61% of women did.  However, a chi-squared test run on the counts used to make these tables did not find a significant difference.  This means that although proportionally more men matriculated in this sample, this difference is not significant. "
+textCitz <- "The proportions of matriculated and non-matriculated students by original citizenship are very similar to those found for gender.  As with gender, the differences in matriculation of accepted students by original citizenship was not found to be statistically significant.  Nonetheless, in this sample larger proportions of international students did not matriculate."
+textLoc <- "Since the data had a wide variety of school locations, a new feature was created based off of the State and Region variables of a student's previous school.  This new feature has a domain of New England, DMV, South, West, International, and USA/Unknown.  The USA/Unknown variable was used when a graduate was indicated as going to school in the US, but did not have any state data (there were only 4 cases of this).  These visuals show that the majority of accepted students who went to schools in international locations did not matriculate.  Additionally, the majority of accepted students who went to school in the DMV (DC-Maryland-Virginia) ended up matriculating.  A chi-squared test was run on the counts used to create these visuals (excluding USA/Unknown and South due to low counts).  The differences in the number of students matriculating by location was statistically significant  (X-squared = 9.82, df = 3, p-value = 0.0200). "
 # Shiny App ui ------------------------------------------------------------------------------------------------------------------
 
-ui <- navbarPage("Project", selected = "Exploritory Analysis", collapsible = TRUE, inverse = TRUE, theme = shinytheme("spacelab"),
+ui <- navbarPage("Project", id = "project", selected = "Exploritory Analysis", collapsible = TRUE, inverse = TRUE, theme = shinytheme("spacelab"),
                  #Main Nav bar Panels
                  tabPanel("Exploritory Analysis",
                           fluidPage(
@@ -251,10 +369,15 @@ ui <- navbarPage("Project", selected = "Exploritory Analysis", collapsible = TRU
                               createPanel("GRE", textGRE),
                               createPaneldiscrete("Major", textMajor),
                               createPaneldiscrete("Gender", textGender),
-                              createPaneldiscrete("Dom_Int", textCitz),
-                              tabPanel("Location")
+                              createPaneldiscrete("Citizenship", textCitz),
+                              createPaneldiscrete("Location", textLoc)
                             ))),
-                 tabPanel("Models"),
+                 tabPanel("Models",
+                          fluidPage(
+                            #nav bar for models
+                            tabsetPanel(
+                              tabPanel("Logistic Model"),
+                              tabPanel("Random Forest Model") )) ),
                  tabPanel("Conclusions")
 )
 
@@ -283,10 +406,28 @@ server <- function(input, output) {
   output$countGender <-  renderPlot({ inputdf <- subsetAdmit() %>% dplyr::select(Gender, Matriculating) %>% 
     set_colnames(c("variable", "Matriculating"))
   createcount("Gender", inputdf)})
-  output$countDom_Int <-  renderPlot({ inputdf <- subsetAdmit() %>% dplyr::select(Dom_Int, Matriculating) %>% 
+  output$countCitizenship <-  renderPlot({ inputdf <- subsetAdmit() %>% dplyr::select(Dom_Int, Matriculating) %>% 
     set_colnames(c("variable", "Matriculating"))
-  createcount("Dom_Int", inputdf)
+  createcount("Citizenship", inputdf)
   })
+  output$countLocation <-  renderPlot(
+    { inputdf <- subsetAdmit() %>% dplyr::select(CollegeRegion, State, Matriculating) %>% 
+                  mutate(CollegeRegion = as.character(CollegeRegion)) %>% mutate(State = as.character(State))
+    #create new region variable
+    inputdf$CollegeRegion[inputdf$CollegeRegion == 'USA' & !is.na(inputdf$State)] <- 
+      inputdf$State[inputdf$CollegeRegion == 'USA' & !is.na(inputdf$State)]
+    inputdf$CollegeRegion <- ifelse(inputdf$CollegeRegion %in% c("Connecticut", "Maine", "Pennsylvania", "New Jersey", "Pittsburgh",
+                                        "New York", "Massachusetts"), "New England", ifelse(inputdf$CollegeRegion %in%
+                                        c("DC", "Delaware", "Virginia", "Maryland"), "DMV", ifelse(inputdf$CollegeRegion %in% 
+                                        c("Canada", "China", "India", "Korea", "Scotland", "Singapore", "Spain", "UK"), "International",
+                                        ifelse(inputdf$CollegeRegion %in% c("Georgia", "Alabama", "Florida", "North Carolina", "Tennessee"), "South",
+                                        ifelse(inputdf$CollegeRegion == "USA", "USA - Unknown State","West"))  )) )
+   
+  inputdf <- inputdf %>% dplyr::select(CollegeRegion, Matriculating) %>% set_colnames(c("variable", "Matriculating"))
+  createcount("Location", inputdf)
+  })
+  
+  
   #create proportions tile objects
   output$propMajor <- renderPlot({ inputdf <- subsetAdmit() %>% dplyr::select(Major, Matriculating) %>% 
     set_colnames(c("variable", "Matriculating"))
@@ -297,18 +438,49 @@ server <- function(input, output) {
     set_colnames(c("variable", "Matriculating"))
   createprop("Gender", inputdf)
   })
-  output$propDom_Int <- renderPlot({ inputdf <- subsetAdmit() %>% dplyr::select(Dom_Int, Matriculating) %>% 
+  output$propCitizenship <- renderPlot({ inputdf <- subsetAdmit() %>% dplyr::select(Dom_Int, Matriculating) %>% 
     set_colnames(c("variable", "Matriculating"))
-  createprop("Dom_Int", inputdf)
+  createprop("Citizenship", inputdf)
+  })
+  output$propLocation <- renderPlot(
+    { inputdf <- subsetAdmit() %>% dplyr::select(CollegeRegion, State, Matriculating) %>% 
+      mutate(CollegeRegion = as.character(CollegeRegion)) %>% mutate(State = as.character(State))
+    #create new region variable
+    inputdf$CollegeRegion[inputdf$CollegeRegion == 'USA' & !is.na(inputdf$State)] <- 
+                          inputdf$State[inputdf$CollegeRegion == 'USA' & !is.na(inputdf$State)]
+    inputdf$CollegeRegion <- ifelse(inputdf$CollegeRegion %in% c("Connecticut", "Maine", "Pennsylvania", "New Jersey", "Pittsburgh",
+                                                                 "New York", "Massachusetts"), "New England", ifelse(inputdf$CollegeRegion %in%
+                                                                                                                       c("DC", "Delaware", "Virginia", "Maryland"), "DMV", ifelse(inputdf$CollegeRegion %in% 
+                                                                                                                                                                                    c("Canada", "China", "India", "Korea", "Scotland", "Singapore", "Spain", "UK"), "International",
+                                                                                                                                                                                  ifelse(inputdf$CollegeRegion %in% c("Georgia", "Alabama", "Florida", "North Carolina", "Tennessee"), "South",
+                                                                                                                                                                                         ifelse(inputdf$CollegeRegion == "USA", "USA - Unknown State","West"))  )) )
+    inputdf <- inputdf %>% dplyr::select(CollegeRegion, Matriculating) %>% set_colnames(c("variable", "Matriculating"))
+    createprop("Location", inputdf)
+    })
+  
+  
+  observeEvent(input$project, {
+    if(input$project == "Exploritory Analysis"){
+      showModal(modalDialog(
+        title = "Project Introduction",
+        HTML("Colleges may know what types of students they're offering admissions to, but what students are actually enrolling/matriculating?  This is an analysis of Georgetown's admissions data, looking specifically at the students accepted into Georgetown.  Determining what characteristics influence whether an accepted student will matriculate could help the efficiency of the college admissions process.  For example, classifier results could 
+pinpoint which students should be targeted with merit scholarships.  Students with probabilities close to 0.5 for both matriculation and non-matriculation, for instance, may be perfect candidates for scholarships. <br><br>
+ The first section contains a thorough exploratory analysis of some key features in the dataset.  More specifically, feature characteristics were examined for accepted students by students' matriculation statuses.  Then, various models were created to determine how well the data can be classified by matriculated and non-matriculated students."),
+        size = 'm',
+        easyClose = TRUE,
+        footer = NULL
+      ))
+    }
   })
   
+
 }
 
 
 
+
+
 shinyApp(ui, server)
-
-
 
 
 
