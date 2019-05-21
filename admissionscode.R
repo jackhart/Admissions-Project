@@ -18,154 +18,104 @@ library(shinyBS)
 getwd() #**set up so your working directory is the repository
 
 #Import Data
-AlumnData <- read.csv(here("ScholarshipApplicationDataFilePretend.csv"))
+AlumnData <- read.csv(here("ScholarshipApplicationDataFilePretend.csv"), fileEncoding="UTF-8-BOM")
 
-# Analysis ------------------------------------------------------------------------------------------------------------------
-table(AlumnData$State)
-sum(table(AlumnData$CollegeRegion))
+# Models and CV Tests -------------------------------------------------------------------------------------
 
+# Run random forest model ==============================================================================
 
-#t-test on GPA
-subset_matriculated <- AlumnData %>% filter(OfferOfAdmissionExtended == 'YES') %>%
-  filter(Matriculating == 'YES')
-subset_NonMatriculated <- AlumnData %>% filter(OfferOfAdmissionExtended == 'YES') %>%
-  filter(Matriculating == 'NO')
-t.test(subset_matriculated$GPA, subset_NonMatriculated$GPA)
-
-#t-test on GRE
-t.test(subset_matriculated$GRE, subset_NonMatriculated$GRE)
-
-#chi-squared test by major -- counts too small
-subset_accepted <- AlumnData %>% filter(OfferOfAdmissionExtended == 'YES')
-chisq.test(table(subset_accepted$Matriculating, subset_accepted$Major))
-
-#prop test on all majors
-MajorsMatric <- subset_accepted %>% count(Matriculating, Major) %>% 
-  dcast(Major ~ Matriculating, value.var = 'n') %>% 
-  filter(!Major %in% c('Accounting', 'Physics', 'Management', 'Finance'))
-total_col = apply(MajorsMatric[,-c(1)], 2, sum)
-
-prop_test_results <- data.frame()
-for(i in 1:nrow(MajorsMatric)){
-  temp1 <- as.list(unname(MajorsMatric[i,-1]))
-  temp <- prop.test(x = c(temp1[[1]], temp1[[2]]), n = total_col[1:2])
-  prop_test_results <- rbind(prop_test_results, 
-                             data.frame("Major" = as.character(MajorsMatric$Major[i]), temp$statistic,
-                                        temp$parameter, "p.value" = temp$p.value))
-}
-rownames(prop_test_results) <- NULL
-prop_test_results <- prop_test_results %>% set_colnames(c("Major", "X-Squared", "df","p-value"))
-
-
-#chi-squared test with gender
-chisq.test(table(subset_accepted$Matriculating, subset_accepted$Gender))
-
-#chi-squared test with citizenship
-chisq.test(table(subset_accepted$Dom_Int, subset_accepted$Matriculating))
-
-
-
-ggplot(data = subset_accepted) + geom_point(aes(x = GPA, y =  GRE, color = Matriculating))
-
-#remove variables that cannot be used
-subset_accepted_cleaned <- subset_accepted %>% dplyr::select(-c("ï..ID", "OfferOfAdmissionExtended", "TOEFL", "CollegeName", "State",
-                                                                "CollegeRegion")) %>%
-                          mutate(Major = ifelse(Major %in% c("Accounting", "Finance", "Management", "Economics"),"Soft Science",
-                                            ifelse(Major %in% c("CS", "Engineering", "Math", "Physics", "Statistics"),
-                                                   "Hard Science", "Other") ) ) %>% mutate(Major = as.factor(Major)) %>% na.omit(.)
-  
-
-
-
-
+#prep data
 #clean subset with all majors and new region variable
-subset_accepted_cleaned3 <- subset_accepted %>% dplyr::select(-c("ï..ID", "OfferOfAdmissionExtended", "TOEFL","CollegeName")) %>%
-                              mutate(CollegeRegion = as.character(CollegeRegion)) %>% mutate(State = as.character(State))
+subset_accepted <- AlumnData %>% filter(OfferOfAdmissionExtended == 'YES')
+subset_accepted_cleaned3 <- subset_accepted %>% dplyr::select(-c("OfferOfAdmissionExtended", "TOEFL","CollegeName")) %>%
+  mutate(CollegeRegion = as.character(CollegeRegion)) %>% mutate(State = as.character(State))
 
 subset_accepted_cleaned3$CollegeRegion[subset_accepted_cleaned3$CollegeRegion == 'USA' &
                                          !is.na(subset_accepted_cleaned3$State)] = 
   subset_accepted_cleaned3$State[subset_accepted_cleaned3$CollegeRegion == 'USA' & !is.na(subset_accepted_cleaned3$State)]
 
 subset_accepted_cleaned3$CollegeRegion <-ifelse(subset_accepted_cleaned3$CollegeRegion %in% c("Connecticut", "Maine", "Pennsylvania", "New Jersey", "Pittsburgh",
-                                                     "New York", "Massachusetts"), "New England", ifelse(subset_accepted_cleaned3$CollegeRegion %in% 
-                                                      c("DC", "Delaware", "Virginia", "Maryland"), "DMV", ifelse(
-                                                        subset_accepted_cleaned3$CollegeRegion %in% c("Canada", "China", "India", "Korea",
-                                                      "Scotland", "Singapore", "Spain", "UK"), "International", ifelse(
-                                                        subset_accepted_cleaned3$CollegeRegion %in% c("Georgia", "Alabama",
-                                                      "Florida", "North Carolina", "Tennessee"), "South",  ifelse(
-                                                        subset_accepted_cleaned3$CollegeRegion == "USA", "USA","West"))  )) )
-
+                                                                                              "New York", "Massachusetts"), "New England", ifelse(subset_accepted_cleaned3$CollegeRegion %in% 
+                                                                                                                                                    c("DC", "Delaware", "Virginia", "Maryland"), "DMV", ifelse(
+                                                                                                                                                      subset_accepted_cleaned3$CollegeRegion %in% c("Canada", "China", "India", "Korea",
+                                                                                                                                                                                                    "Scotland", "Singapore", "Spain", "UK"), "International", ifelse(
+                                                                                                                                                                                                      subset_accepted_cleaned3$CollegeRegion %in% c("Georgia", "Alabama",
+                                                                                                                                                                                                                                                    "Florida", "North Carolina", "Tennessee"), "South",  ifelse(
+                                                                                                                                                                                                                                                      subset_accepted_cleaned3$CollegeRegion == "USA", "USA","West"))  )) )
 subset_accepted_cleaned3 <- subset_accepted_cleaned3 %>% mutate(CollegeRegion = as.factor(CollegeRegion)) %>%
   dplyr::select(-c("State")) %>% na.omit(.)
 
-#**this is the variable created
-table(subset_accepted_cleaned3$CollegeRegion)
 
-
-
-#chi-squared test on college region (Excluding USA - unknown state and South due to low counts)
-chisq.test(table(subset_accepted_cleaned3$CollegeRegion, subset_accepted_cleaned3$Matriculating)[-c(5,4),] )
-
-
-
-#Run random forest model
 #10-fold cv
-
+set.seed(45)
 folds <- sample(rep(1:10, length.out = nrow(subset_accepted_cleaned3)), size = nrow(subset_accepted_cleaned3), replace = F)
-accuracies <- c()
+accuracies_rf <- c()
 for(x in 1:10){
-  model <- randomForest(Matriculating ~ ., data = subset_accepted_cleaned3[folds != x,], ntree = 100)
+  model <- randomForest(Matriculating ~ ., data = subset_accepted_cleaned3[folds != x,], ntree = 50)
   preds <- unname(predict(model,  subset_accepted_cleaned3[folds == x,]))
 
   conf <- table(preds, subset_accepted_cleaned3[folds == x,]$Matriculating)
   acc <- sum(diag(conf))/sum(conf)
-  accuracies <- rbind(accuracies, acc)
+  accuracies_rf <- rbind(accuracies_rf, acc)
   
 }
+
 #Box plot of accuracies
-ggplot() #blah
+dfplot_rf_cv <- data.frame(accuracy = unname(accuracies_rf[,1]))
+rf_accuracies_gg <- ggplot(data = dfplot_rf_cv) + geom_boxplot(aes(y = accuracy), fill = "palegreen3", color = "grey40") +
+  theme_minimal() + scale_y_continuous(breaks = pretty_breaks()) + labs(y = "Accuracy", x = "", title = "", fill = "") +
+  theme(axis.text.x = element_blank())
 
 #Hold-out 70%-30%
-model <- randomForest(Matriculating ~ ., data = subset_accepted_cleaned3[!folds %in% c(1,2,3),], ntree = 100)
-preds <- unname(predict(model,  subset_accepted_cleaned3[folds %in% c(1,2,3),], type = "prob")[,1])
+set.seed(2343)
+model_rf_holdout <- randomForest(Matriculating ~ ., data = subset_accepted_cleaned3[!folds %in% c(1,2,3),], ntree = 50)
+preds_rf_holdout <- unname(predict(model_rf_holdout,  subset_accepted_cleaned3[folds %in% c(1,2,3),], type = "prob")[,1])
 
 #what variables were most important
-varImpPlot(model)
+#varImpPlot(model_rf_holdout)
 
-
-dfplot <- data.frame("pred" = preds, "cover" = subset_accepted_cleaned3[folds %in% c(1,2,3),]$Matriculating)
-ggplot(data = dfplot) + geom_histogram(aes(x = pred, y =..density.., fill = cover),
-                                       position = "identity", bins = 10, alpha = .5)
-plot(roc(dfplot$cover, dfplot$pred))
+dfplot_rf_holdout <- data.frame("pred" = preds_rf_holdout, "cover" = subset_accepted_cleaned3[folds %in% c(1,2,3),]$Matriculating)
+thresholdholdoutdf <- ggplot(data = dfplot_rf_holdout) + geom_histogram(aes(x = pred, y =..density.., fill = cover),
+                                       position = "identity", bins = 10, alpha = .5) + labs(y = "Density", x = "Threshold/Probability", fill = "") +
+                      scale_fill_manual(labels = c("Did Not Matriculate", "Matriculated"), values = c("#F79857", "#61A9B0"))
+#roc plot
+#plot(roc(dfplot_rf_holdout$cover, dfplot_rf_holdout$pred))
 
 
 #Logisitic Model -- Not great
-mod <- glm(data = subset_accepted_cleaned3, Matriculating ~ ., family = "binomial")
-summary(mod)
 
 #10-fold cv
+set.seed(55)
 folds <- sample(rep(1:10, length.out = nrow(subset_accepted_cleaned3)), size = nrow(subset_accepted_cleaned3), replace = F)
-accuracies <- c()
+accuracieslog <- c()
 for(x in 1:10){
   model <- glm(data = subset_accepted_cleaned3[folds != x,], Matriculating ~ ., family = "binomial")
   preds <- unname(predict(model,  subset_accepted_cleaned3[folds == x,], type = "response")) 
   preds <- as.factor(ifelse(preds > .5, "YES", "NO"))
   conf <- table(preds, subset_accepted_cleaned3[folds == x,]$Matriculating)
   acc <- sum(diag(conf))/sum(conf)
-  accuracies <- rbind(accuracies, acc)
-  
+  accuracieslog <- rbind(accuracieslog, acc)
 }
 #Box plot of accuracies
-ggplot() #blah
+dfplot_log_cv <- data.frame(accuracy = unname(accuracieslog[,1]))
+log_accuracies_gg <- ggplot(data = dfplot_log_cv) + geom_boxplot(aes(y = accuracy), fill = "palegreen3", color = "grey40") +
+  theme_minimal() + scale_y_continuous(breaks = pretty_breaks()) + labs(y = "Accuracy", x = "", title = "", fill = "") +
+  theme(axis.text.x = element_blank())
+
 
 
 #Hold-out 70%-30%
-model <- glm(data = subset_accepted_cleaned3[!folds %in% c(1,2,3),], Matriculating ~ ., family = "binomial")
-preds <- unname(predict(model,  subset_accepted_cleaned3[folds %in% c(1,2,3),], type = "response"))
-dfplot <- data.frame("pred" = preds, "cover" = subset_accepted_cleaned3[folds %in% c(1,2,3),]$Matriculating)
-ggplot(data = dfplot) + geom_histogram(aes(x = pred, y =..density.., fill = cover),
-                                       position = "identity", bins = 10, alpha = .5)
-plot(roc(dfplot$cover, dfplot$pred))
+set.seed(33)
+model_log_holdout <- glm(data = subset_accepted_cleaned3[!folds %in% c(1,2,3),], Matriculating ~ ., family = "binomial")
+preds_log <- unname(predict(model_log_holdout,  subset_accepted_cleaned3[folds %in% c(1,2,3),], type = "response"))
+dfplot_log_holdout <- data.frame("pred" = preds_log, "cover" = subset_accepted_cleaned3[folds %in% c(1,2,3),]$Matriculating)
+
+thresholdholdoutlog <- ggplot(data = dfplot_log_holdout) + geom_histogram(aes(x = pred, y =..density.., fill = cover),
+                                                                        position = "identity", bins = 10, alpha = .5) + labs(y = "Density", x = "Threshold/Probability", fill = "") +
+  scale_fill_manual(labels = c("Did Not Matriculate", "Matriculated"), values = c("#F79857", "#61A9B0"))
+
+#roc plot
+#plot(roc(dfplot_log_holdout$cover, dfplot_log_holdout$pred))
 
 
 
@@ -357,6 +307,22 @@ textMajor <- "In the visual with dots, each dot represents an accepted student, 
 textGender <- "The first visual indicates that there were relatively consistent counts of accepted students within each gender category.  The next visual shows the proportions by gender.  About 70% of men who were accepted matriculated into the program, while only 61% of women did.  However, a chi-squared test run on the counts used to make these tables did not find a significant difference.  This means that although proportionally more men matriculated in this sample, this difference is not significant. "
 textCitz <- "The proportions of matriculated and non-matriculated students by original citizenship are very similar to those found for gender.  As with gender, the differences in matriculation of accepted students by original citizenship was not found to be statistically significant.  Nonetheless, in this sample larger proportions of international students did not matriculate."
 textLoc <- "Since the data had a wide variety of school locations, a new feature was created based off of the State and Region variables of a student's previous school.  This new feature has a domain of New England, DMV, South, West, International, and USA/Unknown.  The USA/Unknown variable was used when a graduate was indicated as going to school in the US, but did not have any state data (there were only 4 cases of this).  These visuals show that the majority of accepted students who went to schools in international locations did not matriculate.  Additionally, the majority of accepted students who went to school in the DMV (DC-Maryland-Virginia) ended up matriculating.  A chi-squared test was run on the counts used to create these visuals (excluding USA/Unknown and South due to low counts).  The differences in the number of students matriculating by location was statistically significant  (X-squared = 9.82, df = 3, p-value = 0.0200). "
+text_rf <- "Both models were run on a subset of the data that included the features Gender, Dom_Int, Major, GRE, GPA, and the Region variable (discussed in the exploratory section).  This subset of that data also only included graduates where were accepted, because the point is to try to classify whether or not students matriculated.  Models were testing using 10-fold CV, and some of the following plots were creating from a model using hold-out (70% of data was trained on, 30% was used for testing).
+<br><br>
+ For all parameters (such as the number of trees, and the sample of features selected per tree), the forest model performed poorly.  It appeared to be too flexible, creating unuseful classifications that performed poorly on testing data.  As you can see in the histogram of predicted probabilities (for a class), given the actual class of the data, the classifier is not doing a good job of dividing the classes correctly.  The ROC curve also shows that the classifier performs worse than chance at some thresholds.
+<br><br>
+However, this model does create an interesting visualization: the variable importance plot.  This plot shows which variables were best at splitting the data into homogeneous groups (i.e. which variables were good at classifying).  It appears GPA, GRE, Major, and the region a student previously went to school in are all very important variables in determining whether or not a student will matriculate.
+"
+text_log <- "Both models were run on a subset of the data that included the features Gender, Dom_Int, Major, GRE, GPA, and the Region variable (discussed in the exploratory section).  This subset of that data also only included graduates where were accepted, because the point is to try to classify whether or not students matriculated.  Models were testing using 10-fold CV, and some of the following plots were creating from a model using hold-out (70% of data was trained on, 30% was used for testing).
+<br><br>
+Using a logistic regression turns out to be the way to classify matriculated students for this dataset.  The median accuracy was about 0.7 (seen in the box plot of accuracies found in 10-Fold CV).  The ROC curve shows that the classifier isn't great, but is performing better than chance for.  Additionally, the histogram shows the predicted probabilities (of either matriculated or non-matriculated) calculated on the testing data in hold-out for each actual class value.  Meaning, the histogram plots how well the classifier is separating the matriculated and non-matriculated students.  Generally, it's not doing a great job, but it does look like the classes are separated, somewhat.
+"
+text_conc <- "The exploratory analysis showed that there were significant differences between the GPAs, GREs, and Regions for matriculated and non-matriculated students.  These features appeared to be the most significant and important in the logistic and random forest models.
+<br><br>
+Although the model performances left a lot to be desired, their performances are still quite compelling.  This analysis worked with a relatively small sample and with data that was edited for security purposes.  A school with direct access to all admissions data would increase the number of features in the analysis along with overall observations.  This would clearly increase the performance of the classifiers.  Since the classifiers created were performing moderately well with a limited amount of data and features, this indicates classifiers could be improved with more data. 
+<br><br>
+The analysis shows that creating a model to determine whether a an accepted student will matriculate is possible.  Determining what characteristics influence whether an accepted student will matriculate could help increase efficiency of the college admissions process.  For example, classifier results could pinpoint which students should be targeted with merit scholarships.  Students with probabilities close to 0.5 for both matriculation and non-matriculation, for instance, may be perfect candidates for scholarships.  This could help attract more of the students who would have otherwise decided not to matriculate.
+"
 # Shiny App ui ------------------------------------------------------------------------------------------------------------------
 
 ui <- navbarPage("Project", id = "project", selected = "Exploritory Analysis", collapsible = TRUE, inverse = TRUE, theme = shinytheme("spacelab"),
@@ -376,9 +342,46 @@ ui <- navbarPage("Project", id = "project", selected = "Exploritory Analysis", c
                           fluidPage(
                             #nav bar for models
                             tabsetPanel(
-                              tabPanel("Logistic Model"),
-                              tabPanel("Random Forest Model") )) ),
-                 tabPanel("Conclusions")
+                              tabPanel("Logistic Model", br(),
+                                       fluidRow("Logistic Model Summary",
+                                                #CV test plots
+                                                column(6, wellPanel(HTML(
+                                                  paste("<h1>Logistic Model Summary</h1>",
+                                                        "<p>",text_log, "</p>",
+                                                        sep = "" ))),
+                                                  HTML("<h3>Threshold by Class</h3>"),
+                                                  wellPanel(plotOutput(outputId = "thresholdclasslog"))  ),
+                                                
+                                                column(6, HTML("<h3>10-Fold CV Accuracies</h3>"),
+                                                       wellPanel(plotOutput(outputId = "logcvtest")),
+                                                       HTML("<h3>Hold-Out Testing ROC Curve</h3>"),
+                                                       wellPanel(plotOutput(outputId = "logholdout")))
+                                       )),
+                              tabPanel("Random Forest Model", br(),
+                                       fluidRow("Random Forest Summary",
+                                                #CV test plots
+                                                column(6, wellPanel(HTML(
+                                                  paste("<h1>Random Forest Summary</h1>",
+                                                    "<p>",text_rf, "</p>",
+                                                    sep = "" ))),
+                                                  HTML("<h3>Variable Importance Plot</h3>"),
+                                                  wellPanel(plotOutput(outputId = "rfvariableimp")),
+                                                  HTML("<h3>Threshold by Class</h3>"),
+                                                  wellPanel(plotOutput(outputId = "thresholdclass"))  ),
+                                                
+                                                column(6, HTML("<h3>10-Fold CV Accuracies</h3>"),
+                                                       wellPanel(plotOutput(outputId = "rfcvtest")),
+                                                       HTML("<h3>Hold-Out Testing ROC Curve</h3>"),
+                                                       wellPanel(plotOutput(outputId = "rfholdout")))
+                                        )) ))),
+                 tabPanel("Conclusions", br(),
+                          fluidPage(fluidRow("Logistic Model Summary",
+                                             #CV test plots
+                                             column(12, wellPanel(HTML(
+                                               paste("<h1>Final Remarks</h1>",
+                                                     "<p>",text_conc, "</p>",
+                                                     sep = "" ))))
+                                    ) ) )
 )
 
 
@@ -457,6 +460,17 @@ server <- function(input, output) {
     inputdf <- inputdf %>% dplyr::select(CollegeRegion, Matriculating) %>% set_colnames(c("variable", "Matriculating"))
     createprop("Location", inputdf)
     })
+  
+  #Random Forest Results
+  output$rfvariableimp <- renderPlot({varImpPlot(model_rf_holdout)})
+  output$rfcvtest <- renderPlot({rf_accuracies_gg})
+  output$rfholdout <- renderPlot({plot(roc(dfplot_rf_holdout$cover, dfplot_rf_holdout$pred))})
+  output$thresholdclass <- renderPlot({thresholdholdoutdf})
+  
+  #Logistic Regression Results
+  output$logcvtest <- renderPlot({log_accuracies_gg})
+  output$logholdout <- renderPlot({plot(roc(dfplot_log_holdout$cover, dfplot_log_holdout$pred))})
+  output$thresholdclasslog <- renderPlot({thresholdholdoutlog})
   
   
   observeEvent(input$project, {
