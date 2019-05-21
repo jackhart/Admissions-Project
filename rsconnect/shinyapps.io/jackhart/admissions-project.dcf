@@ -1,0 +1,10 @@
+name: admissions-project
+title:
+username:
+account: jackhart
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 939835
+bundleId: 2097834
+url: https://jackhart.shinyapps.io/admissions-project/
+when: 1558403970.61423
