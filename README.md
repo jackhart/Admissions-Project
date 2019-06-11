@@ -1,3 +1,5 @@
 # Admissions-Project
 
-The app can be viewed here: https://jackhart.shinyapps.io/admissions-project/
+The following projects analizes a fake admissions dataset.  The following page explores the data with visualizations, and shows results of some basic classifiers.
+
+The app can be viewed here: https://admissionprojectaccount.shinyapps.io/admissions-project/
